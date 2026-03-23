@@ -33,62 +33,10 @@ class BranchController extends Controller
             $branches = $this->branchRepo->getAll();
 
             $result = array_map(function ($branch) {
-                $model = BranchModel::with('employees')->find($branch->getId());
+                $employees = $this->getEmployeesForBranch($branch->getId());
+                $weather = $this->getWeatherForBranch($branch);
 
-                $employees = [];
-                if ($model && $model->employees) {
-                    $employees = $model->employees->map(function ($emp) {
-                        return [
-                            'id' => $emp->id,
-                            'name' => $emp->name,
-                            'email' => $emp->email,
-                            'branch_id' => $emp->branch_id
-                        ];
-                    })->toArray();
-                }
-
-                $dto = BranchDTO::fromEntity($branch);
-
-                if ($branch->getLatitude() && $branch->getLongitude()) {
-                    try {
-                        $weather = Cache::remember(
-                            "weather.{$branch->getLatitude()}.{$branch->getLongitude()}",
-                            1800,
-                            fn() => $this->weatherService->getByCoordinates(
-                                $branch->getLatitude(),
-                                $branch->getLongitude()
-                            )
-                        );
-
-                        return [
-                            'id' => $dto->id,
-                            'name' => $dto->name,
-                            'city' => $dto->city,
-                            'country' => $dto->country,
-                            'latitude' => $dto->latitude,
-                            'longitude' => $dto->longitude,
-                            'weather' => $weather,
-                            'employees' => $employees
-                        ];
-                    } catch (WeatherApiException $e) {
-                        Log::warning('Error fetching weather', [
-                            'branch' => $branch->getId(),
-                            'error' => $e->getMessage()
-                        ]);
-                    }
-                }
-
-
-                return [
-                    'id' => $dto->id,
-                    'name' => $dto->name,
-                    'city' => $dto->city,
-                    'country' => $dto->country,
-                    'latitude' => $dto->latitude,
-                    'longitude' => $dto->longitude,
-                    'weather' => null,
-                    'employees' => $employees
-                ];
+                return $this->formatBranchResponse($branch, $employees, $weather);
             }, $branches);
 
             return $this->successResponse($result);
@@ -145,58 +93,12 @@ class BranchController extends Controller
                 return $this->errorResponse('Branch not found', 404);
             }
 
-            $model = BranchModel::with('employees')->find($id);
+            $employees = $this->getEmployeesForBranch($branch->getId());
+            $weather = $this->getWeatherForBranch($branch);
 
-            $employees = [];
-            if ($model && $model->employees) {
-                $employees = $model->employees->map(function ($emp) {
-                    return [
-                        'id' => $emp->id,
-                        'name' => $emp->name,
-                        'email' => $emp->email,
-                        'branch_id' => $emp->branch_id
-                    ];
-                })->toArray();
-            }
-
-            $dto = BranchDTO::fromEntity($branch);
-
-            if ($branch->getLatitude() && $branch->getLongitude()) {
-                try {
-                    $weather = Cache::remember(
-                        "weather.{$branch->getLatitude()}.{$branch->getLongitude()}",
-                        1800,
-                        fn() => $this->weatherService->getByCoordinates(
-                            $branch->getLatitude(),
-                            $branch->getLongitude()
-                        )
-                    );
-
-                    return $this->successResponse([
-                        'id' => $dto->id,
-                        'name' => $dto->name,
-                        'city' => $dto->city,
-                        'country' => $dto->country,
-                        'latitude' => $dto->latitude,
-                        'longitude' => $dto->longitude,
-                        'weather' => $weather,
-                        'employees' => $employees
-                    ]);
-                } catch (\Exception $e) {
-                    Log::warning('Weather error', ['branch' => $id]);
-                }
-            }
-
-            return $this->successResponse([
-                'id' => $dto->id,
-                'name' => $dto->name,
-                'city' => $dto->city,
-                'country' => $dto->country,
-                'latitude' => $dto->latitude,
-                'longitude' => $dto->longitude,
-                'weather' => null,
-                'employees' => $employees
-            ]);
+            return $this->successResponse(
+                $this->formatBranchResponse($branch, $employees, $weather)
+            );
         } catch (\Exception $e) {
             Log::error('Error in show', ['id' => $id, 'error' => $e->getMessage()]);
             return $this->errorResponse('Error fetching branch', 500);
@@ -214,29 +116,29 @@ class BranchController extends Controller
                 'longitude' => 'sometimes|numeric|between:-180,180'
             ]);
 
-            $branchExistente = $this->branchRepo->getById($id);
+            $existingBranch = $this->branchRepo->getById($id);
 
-            if (!$branchExistente) {
+            if (! $existingBranch) {
                 return $this->errorResponse('Branch not found', 404);
             }
 
             $branch = new Branch(
                 id: $id,
-                name: $validated['name'] ?? $branchExistente->getName(),
-                city: $validated['city'] ?? $branchExistente->getCity(),
-                country: $validated['country'] ?? $branchExistente->getCountry(),
+                name: $validated['name'] ??  $existingBranch->getName(),
+                city: $validated['city'] ??  $existingBranch->getCity(),
+                country: $validated['country'] ??  $existingBranch->getCountry(),
                 latitude: isset($validated['latitude'])
                     ? new Latitude($validated['latitude'])
-                    : new Latitude($branchExistente->getLatitude()),
+                    : new Latitude( $existingBranch->getLatitude()),
                 longitude: isset($validated['longitude'])
                     ? new Longitude($validated['longitude'])
-                    : new Longitude($branchExistente->getLongitude())
+                    : new Longitude( $existingBranch->getLongitude())
             );
 
-            $actualizada = $this->branchRepo->update($id, $branch);
+            $updatedBranch = $this->branchRepo->update($id, $branch);
 
             return $this->successResponse(
-                BranchDTO::fromEntity($actualizada)->toArray(),
+                BranchDTO::fromEntity($updatedBranch)->toArray(),
                 'Branch updated successfully'
             );
         } catch (ValidationException $e) {
@@ -258,7 +160,7 @@ class BranchController extends Controller
                 return $this->errorResponse('Branch not found', 404);
             }
 
-            $updated =  EmployeeModel::where('branch_id', $id)
+            EmployeeModel::where('branch_id', $id)
                 ->update(['branch_id' => null]);
 
             $deleted = $this->branchRepo->delete($id);
@@ -277,40 +179,92 @@ class BranchController extends Controller
         }
     }
 
-  public function search(Request $request)
-{
-    try {
-         Log::info('Search called with q: ' . $request->get('q'));
-        
-        $request->validate(['q' => 'required|string|min:2']);
-        
-        Log::info('Validation passed');
-        
-        $branches = $this->branchRepo->searchByNameOrCity($request->q);
-        
-        Log::info('Results found: ' . count($branches));
-        
-        $result = array_map(function ($branch) {
-            $dto = BranchDTO::fromEntity($branch);
-            return [
-                'id' => $dto->id,
-                'name' => $dto->name,
-                'city' => $dto->city,
-                'country' => $dto->country,
-                'latitude' => $dto->latitude,
-                'longitude' => $dto->longitude,
-                'weather' => null,
-                'employees' => []
-            ];
-        }, $branches);
-        
-        return $this->successResponse($result);
-        
-    } catch (ValidationException $e) {
-        return $this->errorResponse('Invalid search term', 422, $e->errors());
-    } catch (\Exception $e) {
-        Log::error('Error searching branches', ['error' => $e->getMessage()]);
-        return $this->errorResponse('Error searching branches', 500);
+    public function search(Request $request)
+    {
+        try {
+
+            $request->validate(['q' => 'required|string|min:2']);
+
+
+            $branches = $this->branchRepo->searchByNameOrCity($request->q);
+
+
+            $result = array_map(function ($branch) {
+                $dto = BranchDTO::fromEntity($branch);
+                return [
+                    'id' => $dto->id,
+                    'name' => $dto->name,
+                    'city' => $dto->city,
+                    'country' => $dto->country,
+                    'latitude' => $dto->latitude,
+                    'longitude' => $dto->longitude,
+                    'weather' => null,
+                    'employees' => []
+                ];
+            }, $branches);
+
+            return $this->successResponse($result);
+        } catch (ValidationException $e) {
+            return $this->errorResponse('Invalid search term', 422, $e->errors());
+        } catch (\Exception $e) {
+            Log::error('Error searching branches', ['error' => $e->getMessage()]);
+            return $this->errorResponse('Error searching branches', 500);
+        }
     }
-}
+
+    private function getEmployeesForBranch(int $branchId): array
+    {
+        $model = BranchModel::with('employees')->find($branchId);
+
+        if (!$model || !$model->employees) {
+            return [];
+        }
+
+        return $model->employees->map(function ($emp) {
+            return [
+                'id' => $emp->id,
+                'name' => $emp->name,
+                'email' => $emp->email,
+                'branch_id' => $emp->branch_id
+            ];
+        })->toArray();
+    }
+    private function getWeatherForBranch(Branch $branch): ?array
+    {
+        if (!$branch->getLatitude() || !$branch->getLongitude()) {
+            return null;
+        }
+
+        try {
+            return Cache::remember(
+                "weather.{$branch->getLatitude()}.{$branch->getLongitude()}",
+                1800,
+                fn() => $this->weatherService->getByCoordinates(
+                    $branch->getLatitude(),
+                    $branch->getLongitude()
+                )
+            );
+        } catch (WeatherApiException $e) {
+            Log::warning('Error fetching weather', [
+                'branch' => $branch->getId(),
+                'error' => $e->getMessage()
+            ]);
+            return null;
+        }
+    }
+    private function formatBranchResponse(Branch $branch, array $employees, ?array $weather = null): array
+    {
+        $dto = BranchDTO::fromEntity($branch);
+
+        return [
+            'id' => $dto->id,
+            'name' => $dto->name,
+            'city' => $dto->city,
+            'country' => $dto->country,
+            'latitude' => $dto->latitude,
+            'longitude' => $dto->longitude,
+            'weather' => $weather,
+            'employees' => $employees
+        ];
+    }
 }
